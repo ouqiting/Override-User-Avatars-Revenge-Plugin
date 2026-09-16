@@ -9,11 +9,31 @@ let patches = [];
 
 export { default as settings } from "./settings";
 
+// build a { userId: imageUrl } map from storage.
+// supports the new multi-user list as well as the old single-user fields.
+function buildOverrides(): Record<string, string> {
+    const overrides: Record<string, string> = {};
+
+    if (Array.isArray(storage.overrides)) {
+        for (const entry of storage.overrides) {
+            if (entry?.userId && entry?.url) {
+                overrides[entry.userId] = entry.url;
+            }
+        }
+    }
+
+    // backward compatibility with the old single-user settings
+    if (storage.targetUserId && storage.imageUrl) {
+        overrides[storage.targetUserId] = storage.imageUrl;
+    }
+
+    return overrides;
+}
+
 export function onLoad(): void {
     console.log(`${TAG} loaded`);
 
-    const TARGET_ID = storage.targetUserId;
-    const OVERRIDE_URL = storage.imageUrl;
+    const OVERRIDES = buildOverrides();
 
     const UserStore = findByStoreName("UserStore");
     if (!UserStore) {
@@ -27,21 +47,21 @@ export function onLoad(): void {
         return;
     }
 
-
+    const urlFor = (user) => (user?.id ? OVERRIDES[user.id] : undefined);
 
     // patch getUserAvatarSource, overrides avatar in DMs and group chats
     if (avatarModule.getUserAvatarSource) {
         const originalGetUserAvatarSource = avatarModule.getUserAvatarSource;
         avatarModule.getUserAvatarSource = function (...args) {
-            const user = args[0];
+            const url = urlFor(args[0]);
 
-            // only intercept target user
-            if (user?.id === TARGET_ID) {
+            // only intercept users that have an override
+            if (url) {
                 const original = originalGetUserAvatarSource.apply(this, args);
                 if (original) {
                     return {
                         ...original,
-                        uri: OVERRIDE_URL
+                        uri: url
                     };
                 }
             }
@@ -54,10 +74,10 @@ export function onLoad(): void {
     // patch getUserAvatarURL, overrides avatar in voice calls
     const originalGetUserAvatarURL = avatarModule.getUserAvatarURL;
     avatarModule.getUserAvatarURL = function (...args) {
-        const user = args[0];
-        // only intercept for target user
-        if (user?.id === TARGET_ID) {
-            return OVERRIDE_URL;
+        const url = urlFor(args[0]);
+        // only intercept users that have an override
+        if (url) {
+            return url;
         }
         // ignore other users
         return originalGetUserAvatarURL.apply(this, args);
@@ -66,12 +86,14 @@ export function onLoad(): void {
 
     console.log(`${TAG} patches applied`);
 
-    // refresh ui
+    // refresh ui for every overridden user
     try {
-        FluxDispatcher.dispatch({
-            type: "USER_UPDATE",
-            user: UserStore.getUser(TARGET_ID)
-        });
+        for (const id of Object.keys(OVERRIDES)) {
+            FluxDispatcher.dispatch({
+                type: "USER_UPDATE",
+                user: UserStore.getUser(id)
+            });
+        }
         console.log(`${TAG} ui refreshed`);
     } catch (e) {
         console.log(`${TAG} could not trigger refresh:`, e.message);
