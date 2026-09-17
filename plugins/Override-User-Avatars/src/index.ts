@@ -7,18 +7,17 @@ const TAG = "[custom-avatars]";
 
 let patches = [];
 
+// remember the real avatar hash of any user we touch so we can restore it on unload
+const originalAvatars = new Map<string, any>();
+
 export { default as settings } from "./settings";
 
-// read the current overrides straight from storage so newly added
-// users apply without needing to reload the plugin.
-function currentOverrides(): Record<string, string> {
+function buildOverrides(): Record<string, string> {
     const overrides: Record<string, string> = {};
 
     if (Array.isArray(storage.overrides)) {
         for (const entry of storage.overrides) {
-            const id = typeof entry?.userId === "string"
-                ? entry.userId.trim()
-                : entry?.userId != null ? String(entry.userId).trim() : "";
+            const id = entry?.userId != null ? String(entry.userId).trim() : "";
             const url = typeof entry?.url === "string" ? entry.url.trim() : "";
 
             if (id && url) {
@@ -42,16 +41,40 @@ function currentOverrides(): Record<string, string> {
     return overrides;
 }
 
-function idOf(user: unknown): string | undefined {
+// rebuild only when storage actually changed (settings replaces the array on every edit)
+let cachedOverrides: Record<string, string> = {};
+let cacheKey: any[] = [];
+function currentOverrides(): Record<string, string> {
+    if (
+        cacheKey[0] !== storage.overrides ||
+        cacheKey[1] !== storage.targetUserId ||
+        cacheKey[2] !== storage.imageUrl
+    ) {
+        cacheKey = [storage.overrides, storage.targetUserId, storage.imageUrl];
+        cachedOverrides = buildOverrides();
+    }
+    return cachedOverrides;
+}
+
+function idOf(user: any): string | undefined {
     if (typeof user === "string") return user;
-    const id = (user as any)?.id;
+    if (!user) return undefined;
+    const id = user.userId ?? user.id ?? user.user?.id;
     return id != null ? String(id) : undefined;
 }
 
-function urlFor(user: unknown): string | undefined {
+function urlFor(user: any): string | undefined {
     const id = idOf(user);
     if (!id) return undefined;
     return currentOverrides()[id];
+}
+
+function patchFn(obj: any, name: string, make: (original: Function) => Function) {
+    const original = obj?.[name];
+    if (typeof original !== "function") return;
+
+    obj[name] = make(original);
+    patches.push(() => { obj[name] = original; });
 }
 
 export function onLoad(): void {
@@ -71,40 +94,65 @@ export function onLoad(): void {
 
     console.log(`${TAG} overrides:`, JSON.stringify(currentOverrides()));
 
-    // patch getUserAvatarSource, overrides avatar in DMs and group chats
-    if (avatarModule.getUserAvatarSource) {
-        const originalGetUserAvatarSource = avatarModule.getUserAvatarSource;
-        avatarModule.getUserAvatarSource = function (...args) {
-            const url = urlFor(args[0]);
+    // ---- user level avatars (DMs, group chats, profile, voice, embeds) ----
 
-            // only intercept users that have an override
-            if (url) {
-                const original = originalGetUserAvatarSource.apply(this, args);
-                if (original) {
-                    return {
-                        ...original,
-                        uri: url
-                    };
+    patchFn(avatarModule, "getUserAvatarSource", (original) => function (...args) {
+        const url = urlFor(args[0]);
+        if (url) return { uri: url };
+        return original.apply(this, args);
+    });
+
+    patchFn(avatarModule, "getUserAvatarURL", (original) => function (...args) {
+        const url = urlFor(args[0]);
+        if (url) return url;
+        return original.apply(this, args);
+    });
+
+    // ---- guild member avatars (messages inside servers) ----
+
+    patchFn(avatarModule, "getGuildMemberAvatarSource", (original) => function (...args) {
+        const url = urlFor(args[0]);
+        if (url) return { uri: url };
+        return original.apply(this, args);
+    });
+
+    patchFn(avatarModule, "getGuildMemberAvatarURL", (original) => function (...args) {
+        const url = urlFor(args[0]);
+        if (url) return url;
+        return original.apply(this, args);
+    });
+
+    patchFn(avatarModule, "getGuildMemberAvatarURLSimple", (original) => function (...args) {
+        const url = urlFor(args[0]);
+        if (url) return url;
+        return original.apply(this, args);
+    });
+
+    // ---- force caches/memos keyed on user.avatar to refresh ----
+    // Discord components often memoise the avatar source, so changing the
+    // underlying avatar hash makes them recompute and pick up our override.
+    patchFn(UserStore, "getUser", (original) => function (...args) {
+        const user = original.apply(this, args);
+
+        try {
+            if (user?.id != null) {
+                const id = String(user.id);
+                const url = currentOverrides()[id];
+
+                if (url) {
+                    if (!originalAvatars.has(id)) originalAvatars.set(id, user.avatar);
+                    if (user.avatar !== url) user.avatar = url;
+                } else if (originalAvatars.has(id)) {
+                    user.avatar = originalAvatars.get(id);
+                    originalAvatars.delete(id);
                 }
             }
-            // ignore everyone else
-            return originalGetUserAvatarSource.apply(this, args);
-        };
-        patches.push(() => { avatarModule.getUserAvatarSource = originalGetUserAvatarSource; });
-    }
-
-    // patch getUserAvatarURL, overrides avatar in voice calls
-    const originalGetUserAvatarURL = avatarModule.getUserAvatarURL;
-    avatarModule.getUserAvatarURL = function (...args) {
-        const url = urlFor(args[0]);
-        // only intercept users that have an override
-        if (url) {
-            return url;
+        } catch (e) {
+            // never let a lookup blow up the client
         }
-        // ignore other users
-        return originalGetUserAvatarURL.apply(this, args);
-    };
-    patches.push(() => { avatarModule.getUserAvatarURL = originalGetUserAvatarURL; });
+
+        return user;
+    });
 
     console.log(`${TAG} patches applied`);
 
@@ -128,6 +176,18 @@ export function onUnload(): void {
     // restore patches
     patches.forEach(unpatch => unpatch());
     patches = [];
+
+    // restore any avatar hashes we changed
+    try {
+        const UserStore = findByStoreName("UserStore");
+        for (const [id, avatar] of originalAvatars) {
+            const user = UserStore?.getUser(id);
+            if (user) user.avatar = avatar;
+        }
+    } catch (e) {
+        console.log(`${TAG} could not restore avatars:`, e.message);
+    }
+    originalAvatars.clear();
 
     console.log(`${TAG} unloaded`);
 }
