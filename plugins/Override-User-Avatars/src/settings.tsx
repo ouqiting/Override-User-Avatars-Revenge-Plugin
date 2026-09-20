@@ -4,12 +4,12 @@ import { Forms } from "@vendetta/ui/components";
 import { storage } from "@vendetta/plugin";
 import { useProxy } from "@vendetta/storage";
 
-const { FormDivider, FormInput, FormRow } = Forms;
+const { FormDivider, FormInput, FormRow, FormSwitch } = Forms;
 const { ScrollView, View, Text, TouchableOpacity } = ReactNative;
 
 let notifyTimer: any;
 
-// nudge Discord to re-render the avatars of every overridden user
+// nudge Discord to re-render the avatars of every enabled overridden user
 function notifyChanged() {
     clearTimeout(notifyTimer);
     notifyTimer = setTimeout(() => {
@@ -18,6 +18,8 @@ function notifyChanged() {
             const list = Array.isArray(storage.overrides) ? storage.overrides : [];
 
             for (const entry of list) {
+                if (entry?.enabled === false) continue;
+
                 const id = entry?.userId?.trim?.();
                 if (!id) continue;
 
@@ -28,6 +30,14 @@ function notifyChanged() {
             console.log("[custom-avatars] refresh failed:", e?.message);
         }
     }, 300);
+}
+
+function normalize(entry: any) {
+    return {
+        userId: entry?.userId || "",
+        url: entry?.url || "",
+        enabled: entry?.enabled !== false,
+    };
 }
 
 export default () => {
@@ -43,7 +53,7 @@ export default () => {
     const current = () => (Array.isArray(storage.overrides) ? storage.overrides : []);
 
     const addOverride = () => {
-        storage.overrides = [...current(), { userId: "", url: "" }];
+        storage.overrides = [...current().map(normalize), { userId: "", url: "", enabled: true }];
     };
 
     const removeOverride = (index: number) => {
@@ -51,11 +61,9 @@ export default () => {
         notifyChanged();
     };
 
-    const updateOverride = (index: number, key: "userId" | "url", value: string) => {
+    const updateOverride = (index: number, key: "userId" | "url" | "enabled", value: any) => {
         storage.overrides = current().map((entry, i) =>
-            i === index
-                ? { userId: entry.userId || "", url: entry.url || "", [key]: value }
-                : { userId: entry.userId || "", url: entry.url || "" }
+            i === index ? { ...normalize(entry), [key]: value } : normalize(entry)
         );
         notifyChanged();
     };
@@ -65,38 +73,47 @@ export default () => {
             <FormRow label="Avatar Overrides" />
             <FormRow
                 label="Add one row per user you want to override."
-                subLabel="Leave a row blank to ignore it."
+                subLabel="Use the toggle to enable or disable each one."
             />
             <FormDivider />
 
-            {entries.map((entry, index) => (
-                <View key={index}>
-                    <FormRow label={`User ${index + 1}`} />
-                    <FormInput
-                        placeholder="Enter Target User ID"
-                        value={entry.userId || ""}
-                        onChange={(v) => updateOverride(index, "userId", v)}
-                    />
-                    <FormInput
-                        placeholder="Enter image URL"
-                        value={entry.url || ""}
-                        onChange={(v) => updateOverride(index, "url", v)}
-                    />
-                    <TouchableOpacity onPress={() => removeOverride(index)}>
-                        <Text
-                            style={{
-                                color: "#f04747",
-                                textAlign: "center",
-                                paddingVertical: 12,
-                                fontWeight: "600",
-                            }}
-                        >
-                            Remove
-                        </Text>
-                    </TouchableOpacity>
-                    <FormDivider />
-                </View>
-            ))}
+            {entries.map((entry, index) => {
+                const enabled = entry?.enabled !== false;
+
+                return (
+                    <View key={index}>
+                        <FormRow label={`User ${index + 1}`} />
+                        <FormInput
+                            placeholder="Enter Target User ID"
+                            value={entry.userId || ""}
+                            onChange={(v) => updateOverride(index, "userId", v)}
+                        />
+                        <FormInput
+                            placeholder="Enter image URL"
+                            value={entry.url || ""}
+                            onChange={(v) => updateOverride(index, "url", v)}
+                        />
+                        <FormSwitch
+                            label="Enabled"
+                            value={enabled}
+                            onValueChange={(v) => updateOverride(index, "enabled", v)}
+                        />
+                        <TouchableOpacity onPress={() => removeOverride(index)}>
+                            <Text
+                                style={{
+                                    color: "#f04747",
+                                    textAlign: "center",
+                                    paddingVertical: 12,
+                                    fontWeight: "600",
+                                }}
+                            >
+                                Remove
+                            </Text>
+                        </TouchableOpacity>
+                        <FormDivider />
+                    </View>
+                );
+            })}
 
             <TouchableOpacity onPress={addOverride}>
                 <Text

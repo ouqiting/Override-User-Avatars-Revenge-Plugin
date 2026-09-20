@@ -20,7 +20,7 @@ function buildOverrides(): Record<string, string> {
             const id = entry?.userId != null ? String(entry.userId).trim() : "";
             const url = typeof entry?.url === "string" ? entry.url.trim() : "";
 
-            if (id && url) {
+            if (id && url && entry.enabled !== false) {
                 overrides[id] = url;
             }
         }
